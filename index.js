@@ -1,6 +1,3 @@
-
-
-
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -33,7 +30,6 @@ app.get("/", (req, res) => {
   res.send("FixMate server is running");
 });
 
-// 1. পাবলিক /services রাউট (শুধু approved ও available সার্ভিস)
 app.get("/services", async (req, res) => {
   const { search, category, serviceMode, sort, limit } = req.query;
 
