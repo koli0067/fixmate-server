@@ -305,28 +305,71 @@ app.get("/bookings/technician/:email", async (req, res) => {
 });
 
 // 10. বুকিং স্ট্যাটাস আপডেট করা (Accept, In Progress, Complete, Reject)
+// app.patch("/bookings/:id/status", async (req, res) => {
+//   const { id } = req.params;
+//   const { status, finalAmount } = req.body;
+
+//   if (!ObjectId.isValid(id)) {
+//     return res.status(400).send({ message: "Invalid booking ID" });
+//   }
+
+//   const updateFields = {
+//     status,
+//     ...(typeof finalAmount === "number" && !Number.isNaN(finalAmount)
+//       ? { finalAmount }
+//       : {}),
+//     updatedAt: new Date(),
+//   };
+
+//   const result = await bookingsCollection.updateOne(
+//     { _id: new ObjectId(id) },
+//     { $set: updateFields }
+//   );
+
+//   res.send(result);
+// });
+
 app.patch("/bookings/:id/status", async (req, res) => {
-  const { id } = req.params;
-  const { status, finalAmount } = req.body;
+  try {
+    const { id } = req.params;
+    const { status, finalAmount } = req.body;
 
-  if (!ObjectId.isValid(id)) {
-    return res.status(400).send({ message: "Invalid booking ID" });
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid booking ID" });
+    }
+
+    const allowedStatuses = [
+      "requested",
+      "accepted",
+      "in-progress",
+      "completed",
+      "rejected",
+      "cancelled",
+    ];
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).send({ message: "Invalid booking status" });
+    }
+
+    const updateFields = {
+      status,
+      updatedAt: new Date(),
+    };
+
+    if (status === "completed" && typeof finalAmount === "number" && finalAmount > 0) {
+      updateFields.finalAmount = finalAmount;
+    }
+
+    const result = await bookingsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateFields }
+    );
+
+    res.send(result);
+  } catch (error) {
+    console.error("Booking status update error:", error);
+    res.status(500).send({ message: "Failed to update booking status" });
   }
-
-  const updateFields = {
-    status,
-    ...(typeof finalAmount === "number" && !Number.isNaN(finalAmount)
-      ? { finalAmount }
-      : {}),
-    updatedAt: new Date(),
-  };
-
-  const result = await bookingsCollection.updateOne(
-    { _id: new ObjectId(id) },
-    { $set: updateFields }
-  );
-
-  res.send(result);
 });
 
 // 11. ইউজারের প্রোফাইল তথ্য আনা (Settings পেজের জন্য)
@@ -394,6 +437,151 @@ app.patch("/bookings/:id/cancel", async (req, res) => {
 
   res.send(result);
 });
+
+
+// 14. অ্যাডমিনের জন্য সব সার্ভিস আনা (pending, approved, rejected সবই দেখাবে)
+app.get("/admin/services", async (req, res) => {
+  try {
+    const { status } = req.query;
+    const query = {};
+
+    if (status && status !== "all") {
+      query.approvalStatus = status;
+    }
+
+    const services = await servicesCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    // Pending সার্ভিসগুলো সবার ওপরে রাখার জন্য সর্ট
+    const sorted = services.sort((a, b) => {
+      if (a.approvalStatus === "pending" && b.approvalStatus !== "pending") return -1;
+      if (a.approvalStatus !== "pending" && b.approvalStatus === "pending") return 1;
+      return 0;
+    });
+
+    res.send(sorted);
+  } catch (error) {
+    console.error("Error fetching admin services:", error);
+    res.status(500).send({ message: "Failed to load services" });
+  }
+});
+
+// 15. সার্ভিস Approve বা Reject করা
+app.patch("/admin/services/:id/approval", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { approvalStatus } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid service ID" });
+    }
+
+    if (!["approved", "rejected", "pending"].includes(approvalStatus)) {
+      return res.status(400).send({ message: "Invalid approval status" });
+    }
+
+    const result = await servicesCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          approvalStatus,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    res.send(result);
+  } catch (error) {
+    console.error("Error updating service approval:", error);
+    res.status(500).send({ message: "Failed to update service approval" });
+  }
+});
+
+
+// 16. বুকিংয়ের পেমেন্ট সম্পন্ন করা ও ট্রানজেকশন সেভ করা age vage amni akta disi
+app.patch("/bookings/:id/pay", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { paymentMethod = "Card" } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid booking ID" });
+    }
+
+    const booking = await bookingsCollection.findOne({ _id: new ObjectId(id) });
+    if (!booking) {
+      return res.status(404).send({ message: "Booking not found" });
+    }
+
+    if (booking.paymentStatus === "paid") {
+      return res.status(400).send({ message: "Booking is already paid" });
+    }
+
+    const amount = booking.finalAmount ?? booking.basePrice ?? 0;
+    const transactionId = `TXN-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const paidAt = new Date();
+
+    // বুকিং স্ট্যাটাস paid করা
+    await bookingsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          paymentStatus: "paid",
+          transactionId,
+          paidAt,
+          updatedAt: paidAt,
+        },
+      }
+    );
+
+    // ট্রানজেকশন/পেমেন্ট হিস্ট্রিতে সেভ করা (Customer Payments ও Admin Transactions-এর জন্য)
+    const paymentRecord = {
+      bookingId: id,
+      transactionId,
+      serviceTitle: booking.serviceTitle,
+      category: booking.category || "Repair",
+      customerName: booking.customerName,
+      customerEmail: booking.customerEmail,
+      technicianName: booking.technicianName || "Technician",
+      technicianEmail: booking.technicianEmail,
+      amount,
+      paymentMethod,
+      status: "paid",
+      paidAt,
+    };
+
+    await paymentsCollection.insertOne(paymentRecord);
+
+    res.send({
+      success: true,
+      transactionId,
+      amount,
+      payment: paymentRecord,
+    });
+  } catch (error) {
+    console.error("Payment processing error:", error);
+    res.status(500).send({ message: "Failed to process payment" });
+  }
+});
+
+// 17. কাস্টমারের পেমেন্ট হিস্ট্রি আনা atao amni akta
+app.get("/payments/customer/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+    const payments = await paymentsCollection
+      .find({ customerEmail: email })
+      .sort({ paidAt: -1 })
+      .toArray();
+
+    res.send(payments);
+  } catch (error) {
+    console.error("Error fetching customer payments:", error);
+    res.status(500).send({ message: "Failed to fetch payment history" });
+  }
+});
+
 
 app.listen(port, () => {
   console.log(`Server listening on port ${port}`);
