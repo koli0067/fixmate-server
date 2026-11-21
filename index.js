@@ -116,6 +116,22 @@ const verifyCustomer = (req, res, next) => {
   next();
 };
 
+
+// const verifyCustomer = (req, res, next) => {
+//   console.log("DEBUG verifyCustomer -> req.user:", req.user);
+//   if (req.user?.role !== "customer") {
+//     return res.status(403).send({
+//       message: "Forbidden: Customers only",
+//       debugRole: req.user?.role || null,
+//       debugEmail: req.user?.email || null,
+//     });
+//   }
+//   next();
+// };
+
+
+
+
 const verifyTechnician = (req, res, next) => {
   if (req.user?.role !== "technician") {
     return res.status(403).send({ message: "Forbidden: Technicians only" });
