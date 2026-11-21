@@ -551,9 +551,6 @@ app.delete("/services/:id", verifyToken, verifyTechnician, async (req, res) => {
   }
 });
 
-// ==========================================
-// Booking & Job Status Pipeline Routes
-// ==========================================
 // 8. নতুন বুকিং তৈরি করা (শুধু Customer রিকোয়েস্ট করতে পারবে)
 app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
   try {
