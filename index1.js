@@ -306,9 +306,6 @@ app.get("/services/:id", async (req, res) => {
   }
 });
 
-// ==========================================
-// Technician Service Routes (Protected)
-// ==========================================
 // 3. টেকনিশিয়ানের নিজের সব সার্ভিস আনা
 app.get(
   "/services/technician/:email",
