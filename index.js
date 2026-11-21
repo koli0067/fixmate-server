@@ -65,6 +65,19 @@ const escapeRegex = (str = "") =>
 
 const normalizeEmail = (email = "") => String(email).trim().toLowerCase();
 
+// Helper: Register handler on both non-/api and /api paths
+const registerDualRoute = (method, path, ...handlers) => {
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  const apiPath = cleanPath.startsWith("/api/")
+    ? cleanPath
+    : `/api${cleanPath}`;
+
+  app[method](cleanPath, ...handlers);
+  if (apiPath !== cleanPath) {
+    app[method](apiPath, ...handlers);
+  }
+};
+
 // ==========================================
 // Auth & Role Middlewares (Challenge 2)
 // ==========================================
@@ -116,22 +129,6 @@ const verifyCustomer = (req, res, next) => {
   next();
 };
 
-
-// const verifyCustomer = (req, res, next) => {
-//   console.log("DEBUG verifyCustomer -> req.user:", req.user);
-//   if (req.user?.role !== "customer") {
-//     return res.status(403).send({
-//       message: "Forbidden: Customers only",
-//       debugRole: req.user?.role || null,
-//       debugEmail: req.user?.email || null,
-//     });
-//   }
-//   next();
-// };
-
-
-
-
 const verifyTechnician = (req, res, next) => {
   if (req.user?.role !== "technician") {
     return res.status(403).send({ message: "Forbidden: Technicians only" });
@@ -149,7 +146,7 @@ const verifyAdmin = (req, res, next) => {
 // ==========================================
 // Helper: JWT Issue Endpoint (BetterAuth / Login sync)
 // ==========================================
-app.post("/api/auth/jwt", async (req, res) => {
+const issueJwtHandler = async (req, res) => {
   try {
     const { email, name } = req.body;
     if (!email) {
@@ -181,17 +178,19 @@ app.post("/api/auth/jwt", async (req, res) => {
     console.error("JWT issue error:", error);
     res.status(500).send({ message: "Failed to issue token" });
   }
-});
+};
 
-// =========================================
+registerDualRoute("post", "/api/auth/jwt", issueJwtHandler);
+registerDualRoute("post", "/auth/jwt", issueJwtHandler);
+
+// ==========================================
 // Root & Public Service Routes
 // ==========================================
 app.get("/", (req, res) => {
   res.send("FixMate server is running");
 });
 
-// 1. Approved & Available সার্ভিসগুলো আনা (Search, Filter, Sort)
-app.get("/services", async (req, res) => {
+const getPublicServicesHandler = async (req, res) => {
   try {
     const { search, category, serviceMode, sort, limit } = req.query;
 
@@ -241,10 +240,11 @@ app.get("/services", async (req, res) => {
     console.error("Error fetching services:", error);
     res.status(500).send({ message: "Failed to load services" });
   }
-});
+};
 
-// 2. একটি নির্দিষ্ট সার্ভিসের ডিটেইলস ও টেকনিশিয়ানের সামারি আনা
-app.get("/services/:id", async (req, res) => {
+registerDualRoute("get", "/services", getPublicServicesHandler);
+
+const getServiceByIdHandler = async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -304,48 +304,55 @@ app.get("/services/:id", async (req, res) => {
     console.error("Error fetching service details:", error);
     res.status(500).send({ message: "Failed to load service details" });
   }
-});
+};
+
+registerDualRoute("get", "/services/:id", getServiceByIdHandler);
 
 // ==========================================
 // Technician Service Routes (Protected)
 // ==========================================
-// 3. টেকনিশিয়ানের নিজের সব সার্ভিস আনা
-app.get(
+const getTechnicianServicesHandler = async (req, res) => {
+  try {
+    const requestedEmail = req.params.email
+      ? normalizeEmail(decodeURIComponent(req.params.email))
+      : req.user.email;
+
+    if (!requestedEmail || requestedEmail !== req.user.email) {
+      return res
+        .status(403)
+        .send({ message: "Forbidden: You can only view your own services" });
+    }
+
+    const services = await servicesCollection
+      .find({
+        technicianEmail: new RegExp(`^${escapeRegex(req.user.email)}$`, "i"),
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(services);
+  } catch (error) {
+    console.error("Error fetching technician services:", error);
+    res.status(500).send({ message: "Failed to load technician services" });
+  }
+};
+
+registerDualRoute(
+  "get",
   "/services/technician/:email",
   verifyToken,
   verifyTechnician,
-  async (req, res) => {
-    try {
-      const requestedEmail = normalizeEmail(
-        decodeURIComponent(req.params.email || "")
-      );
-
-      if (!requestedEmail || requestedEmail !== req.user.email) {
-        return res
-          .status(403)
-          .send({ message: "Forbidden: You can only view your own services" });
-      }
-
-      const services = await servicesCollection
-        .find({
-          technicianEmail: new RegExp(
-            `^${escapeRegex(req.user.email)}$`,
-            "i"
-          ),
-        })
-        .sort({ createdAt: -1 })
-        .toArray();
-
-      res.send(services);
-    } catch (error) {
-      console.error("Error fetching technician services:", error);
-      res.status(500).send({ message: "Failed to load technician services" });
-    }
-  }
+  getTechnicianServicesHandler
+);
+registerDualRoute(
+  "get",
+  "/services/technician",
+  verifyToken,
+  verifyTechnician,
+  getTechnicianServicesHandler
 );
 
-// 4. নতুন সার্ভিস তৈরি করা (Technician Add Service)
-app.post("/services", verifyToken, verifyTechnician, async (req, res) => {
+const createServiceHandler = async (req, res) => {
   try {
     const {
       title,
@@ -403,51 +410,60 @@ app.post("/services", verifyToken, verifyTechnician, async (req, res) => {
     console.error("Error creating service:", error);
     res.status(500).send({ message: "Failed to create service" });
   }
-});
+};
 
-// 5. সার্ভিসের availability (isAvailable: true/false) আপডেট করা
-app.patch(
+registerDualRoute(
+  "post",
+  "/services",
+  verifyToken,
+  verifyTechnician,
+  createServiceHandler
+);
+
+const updateServiceAvailabilityHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isAvailable } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid service ID" });
+    }
+
+    const existingService = await servicesCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!existingService) {
+      return res.status(404).send({ message: "Service not found" });
+    }
+
+    if (normalizeEmail(existingService.technicianEmail) !== req.user.email) {
+      return res
+        .status(403)
+        .send({ message: "Forbidden: You do not own this service" });
+    }
+
+    const result = await servicesCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { isAvailable: Boolean(isAvailable), updatedAt: new Date() } }
+    );
+
+    res.send(result);
+  } catch (error) {
+    console.error("Error updating service availability:", error);
+    res.status(500).send({ message: "Failed to update availability" });
+  }
+};
+
+registerDualRoute(
+  "patch",
   "/services/:id/availability",
   verifyToken,
   verifyTechnician,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { isAvailable } = req.body;
-
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).send({ message: "Invalid service ID" });
-      }
-
-      const existingService = await servicesCollection.findOne({
-        _id: new ObjectId(id),
-      });
-
-      if (!existingService) {
-        return res.status(404).send({ message: "Service not found" });
-      }
-
-      if (normalizeEmail(existingService.technicianEmail) !== req.user.email) {
-        return res
-          .status(403)
-          .send({ message: "Forbidden: You do not own this service" });
-      }
-
-      const result = await servicesCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { isAvailable: Boolean(isAvailable), updatedAt: new Date() } }
-      );
-
-      res.send(result);
-    } catch (error) {
-      console.error("Error updating service availability:", error);
-      res.status(500).send({ message: "Failed to update availability" });
-    }
-  }
+  updateServiceAvailabilityHandler
 );
 
-// 6. সার্ভিস এডিট / আপডেট করা (এডিট করলে approvalStatus আবার 'pending' হবে)
-app.patch("/services/:id", verifyToken, verifyTechnician, async (req, res) => {
+const updateServiceHandler = async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -518,10 +534,17 @@ app.patch("/services/:id", verifyToken, verifyTechnician, async (req, res) => {
     console.error("Error updating service:", error);
     res.status(500).send({ message: "Failed to update service" });
   }
-});
+};
 
-// 7. সার্ভিস ডিলিট করা
-app.delete("/services/:id", verifyToken, verifyTechnician, async (req, res) => {
+registerDualRoute(
+  "patch",
+  "/services/:id",
+  verifyToken,
+  verifyTechnician,
+  updateServiceHandler
+);
+
+const deleteServiceHandler = async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -549,49 +572,59 @@ app.delete("/services/:id", verifyToken, verifyTechnician, async (req, res) => {
     console.error("Error deleting service:", error);
     res.status(500).send({ message: "Failed to delete service" });
   }
-});
+};
+
+registerDualRoute(
+  "delete",
+  "/services/:id",
+  verifyToken,
+  verifyTechnician,
+  deleteServiceHandler
+);
 
 // ==========================================
 // Booking & Job Status Pipeline Routes
 // ==========================================
-// 8. নতুন বুকিং তৈরি করা (শুধু Customer রিকোয়েস্ট করতে পারবে)
-app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
+const createBookingHandler = async (req, res) => {
   try {
-    const booking = req.body;
+    const booking = req.body || {};
+    const cleanServiceId = String(booking.serviceId || "").trim();
 
-    if (!booking.serviceId) {
+    if (!cleanServiceId) {
       return res.status(400).send({ message: "serviceId is required" });
     }
 
     const customerEmail = req.user.email;
 
-    if (
-      booking.technicianEmail &&
-      normalizeEmail(booking.technicianEmail) === customerEmail
-    ) {
-      return res
-        .status(403)
-        .send({ message: "You cannot request your own service" });
-    }
-
     let serviceDoc = null;
-    if (ObjectId.isValid(String(booking.serviceId).trim())) {
+    if (ObjectId.isValid(cleanServiceId)) {
       serviceDoc = await servicesCollection.findOne({
-        _id: new ObjectId(String(booking.serviceId).trim()),
+        _id: new ObjectId(cleanServiceId),
       });
     }
 
+    if (!serviceDoc) {
+      return res.status(404).send({ message: "Service not found" });
+    }
+
     if (
-      serviceDoc?.technicianEmail &&
-      normalizeEmail(serviceDoc.technicianEmail) === customerEmail
+      serviceDoc.approvalStatus !== "approved" ||
+      serviceDoc.isAvailable !== true
     ) {
+      return res.status(400).send({
+        message: "Service is not available for booking",
+      });
+    }
+
+    const resolvedTechEmail = normalizeEmail(serviceDoc.technicianEmail || "");
+    if (resolvedTechEmail && resolvedTechEmail === customerEmail) {
       return res
         .status(403)
         .send({ message: "You cannot request your own service" });
     }
 
     const existingActive = await bookingsCollection.findOne({
-      serviceId: String(booking.serviceId).trim(),
+      serviceId: cleanServiceId,
       customerEmail: new RegExp(`^${escapeRegex(customerEmail)}$`, "i"),
       status: { $in: ["requested", "accepted", "in-progress"] },
     });
@@ -602,23 +635,26 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
       });
     }
 
-    const resolvedBasePrice = Number(
-      booking.basePrice ?? serviceDoc?.basePrice ?? 0
-    );
+    const resolvedBasePrice = Number(serviceDoc.basePrice ?? 0);
+    if (!Number.isFinite(resolvedBasePrice) || resolvedBasePrice <= 0) {
+      return res.status(400).send({ message: "Invalid service base price" });
+    }
 
     const now = new Date();
     const newBooking = {
-      ...booking,
-      serviceTitle: booking.serviceTitle || serviceDoc?.title || "",
-      serviceImage: booking.serviceImage || serviceDoc?.image || "",
-      category: booking.category || serviceDoc?.category || "",
+      serviceId: cleanServiceId,
+      serviceTitle: serviceDoc.title || String(booking.serviceTitle || "").trim(),
+      serviceImage: serviceDoc.image || String(booking.serviceImage || "").trim(),
+      category: serviceDoc.category || String(booking.category || "").trim(),
       technicianName:
-        booking.technicianName || serviceDoc?.technicianName || "",
-      technicianEmail: normalizeEmail(
-        booking.technicianEmail || serviceDoc?.technicianEmail || ""
-      ),
-      customerName: booking.customerName || req.user.name || "",
+        serviceDoc.technicianName || String(booking.technicianName || "").trim(),
+      technicianEmail: resolvedTechEmail,
+      customerName: String(booking.customerName || req.user.name || "").trim(),
       customerEmail,
+      preferredDate: booking.preferredDate ? String(booking.preferredDate).trim() : "",
+      preferredTime: booking.preferredTime ? String(booking.preferredTime).trim() : "",
+      address: booking.address ? String(booking.address).trim() : "",
+      notes: booking.notes ? String(booking.notes).trim() : "",
       basePrice: resolvedBasePrice,
       status: "requested",
       finalAmount: resolvedBasePrice,
@@ -636,9 +672,16 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
     console.error("Error creating booking:", error);
     res.status(500).send({ message: "Failed to create booking" });
   }
-});
+};
 
-// 9. নির্দিষ্ট কাস্টমারের সব বুকিং আনা
+registerDualRoute(
+  "post",
+  "/bookings",
+  verifyToken,
+  verifyCustomer,
+  createBookingHandler
+);
+
 const getCustomerBookingsHandler = async (req, res) => {
   try {
     const targetEmail = req.params.email
@@ -665,15 +708,21 @@ const getCustomerBookingsHandler = async (req, res) => {
   }
 };
 
-app.get(
+registerDualRoute(
+  "get",
   "/bookings/customer/:email",
   verifyToken,
   verifyCustomer,
   getCustomerBookingsHandler
 );
-app.get("/bookings/my", verifyToken, verifyCustomer, getCustomerBookingsHandler);
+registerDualRoute(
+  "get",
+  "/bookings/my",
+  verifyToken,
+  verifyCustomer,
+  getCustomerBookingsHandler
+);
 
-// 10. নির্দিষ্ট টেকনিশিয়ানের সব বুকিং রিকোয়েস্ট আনা
 const getTechnicianBookingsHandler = async (req, res) => {
   try {
     const targetEmail = req.params.email
@@ -700,162 +749,167 @@ const getTechnicianBookingsHandler = async (req, res) => {
   }
 };
 
-app.get(
+registerDualRoute(
+  "get",
   "/bookings/technician/:email",
   verifyToken,
   verifyTechnician,
   getTechnicianBookingsHandler
 );
-app.get(
+registerDualRoute(
+  "get",
   "/bookings/technician",
   verifyToken,
   verifyTechnician,
   getTechnicianBookingsHandler
 );
 
-// 11. বুকিং স্ট্যাটাস আপডেট করা (Strict Pipeline - Challenge 3)
-app.patch(
+const updateBookingStatusHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, finalAmount } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid booking ID" });
+    }
+
+    const booking = await bookingsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+    if (!booking) {
+      return res.status(404).send({ message: "Booking not found" });
+    }
+
+    if (normalizeEmail(booking.technicianEmail) !== req.user.email) {
+      return res
+        .status(403)
+        .send({ message: "Only the assigned technician can update this job" });
+    }
+
+    const currentStatus = booking.status;
+    const allowedTransitions = {
+      requested: ["accepted", "rejected"],
+      accepted: ["in-progress"],
+      "in-progress": ["completed"],
+      completed: [],
+      rejected: [],
+      cancelled: [],
+    };
+
+    const nextAllowed = allowedTransitions[currentStatus] || [];
+    if (!nextAllowed.includes(status)) {
+      return res.status(400).send({
+        message: `Invalid status transition from '${currentStatus}' to '${status}'`,
+      });
+    }
+
+    const updateFields = {
+      status,
+      updatedAt: new Date(),
+    };
+
+    if (status === "completed") {
+      const numericFinal = Number(finalAmount);
+      if (!Number.isFinite(numericFinal) || numericFinal <= 0) {
+        return res.status(400).send({
+          message:
+            "finalAmount must be a number greater than 0 when completing a job",
+        });
+      }
+      updateFields.finalAmount = numericFinal;
+    }
+
+    const result = await bookingsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: updateFields,
+        $push: {
+          statusHistory: {
+            status,
+            changedAt: new Date(),
+          },
+        },
+      }
+    );
+
+    res.send(result);
+  } catch (error) {
+    console.error("Booking status update error:", error);
+    res.status(500).send({ message: "Failed to update booking status" });
+  }
+};
+
+registerDualRoute(
+  "patch",
   "/bookings/:id/status",
   verifyToken,
   verifyTechnician,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { status, finalAmount } = req.body;
-
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).send({ message: "Invalid booking ID" });
-      }
-
-      const booking = await bookingsCollection.findOne({
-        _id: new ObjectId(id),
-      });
-      if (!booking) {
-        return res.status(404).send({ message: "Booking not found" });
-      }
-
-      if (normalizeEmail(booking.technicianEmail) !== req.user.email) {
-        return res
-          .status(403)
-          .send({ message: "Only the assigned technician can update this job" });
-      }
-
-      const currentStatus = booking.status;
-      const allowedTransitions = {
-        requested: ["accepted", "rejected"],
-        accepted: ["in-progress"],
-        "in-progress": ["completed"],
-        completed: [],
-        rejected: [],
-        cancelled: [],
-      };
-
-      const nextAllowed = allowedTransitions[currentStatus] || [];
-      if (!nextAllowed.includes(status)) {
-        return res.status(400).send({
-          message: `Invalid status transition from '${currentStatus}' to '${status}'`,
-        });
-      }
-
-      const updateFields = {
-        status,
-        updatedAt: new Date(),
-      };
-
-      if (status === "completed") {
-        const numericFinal = Number(finalAmount);
-        if (!Number.isFinite(numericFinal) || numericFinal <= 0) {
-          return res.status(400).send({
-            message:
-              "finalAmount must be a number greater than 0 when completing a job",
-          });
-        }
-        updateFields.finalAmount = numericFinal;
-      }
-
-      const result = await bookingsCollection.updateOne(
-        { _id: new ObjectId(id) },
-        {
-          $set: updateFields,
-          $push: {
-            statusHistory: {
-              status,
-              changedAt: new Date(),
-            },
-          },
-        }
-      );
-
-      res.send(result);
-    } catch (error) {
-      console.error("Booking status update error:", error);
-      res.status(500).send({ message: "Failed to update booking status" });
-    }
-  }
+  updateBookingStatusHandler
 );
 
-// 14. কাস্টমারের বুকিং ক্যান্সেল করা (শুধু 'requested' অবস্থায় ও নিজের বুকিং)
-app.patch(
+const cancelBookingHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid booking ID" });
+    }
+
+    const existingBooking = await bookingsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!existingBooking) {
+      return res.status(404).send({ message: "Booking not found" });
+    }
+
+    if (normalizeEmail(existingBooking.customerEmail) !== req.user.email) {
+      return res
+        .status(403)
+        .send({ message: "Forbidden: You can only cancel your own booking" });
+    }
+
+    if (existingBooking.status !== "requested") {
+      return res.status(400).send({
+        message: "Only requested bookings can be cancelled",
+      });
+    }
+
+    const result = await bookingsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          status: "cancelled",
+          updatedAt: new Date(),
+        },
+        $push: {
+          statusHistory: {
+            status: "cancelled",
+            changedAt: new Date(),
+          },
+        },
+      }
+    );
+
+    res.send(result);
+  } catch (error) {
+    console.error("Error cancelling booking:", error);
+    res.status(500).send({ message: "Failed to cancel booking" });
+  }
+};
+
+registerDualRoute(
+  "patch",
   "/bookings/:id/cancel",
   verifyToken,
   verifyCustomer,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).send({ message: "Invalid booking ID" });
-      }
-
-      const existingBooking = await bookingsCollection.findOne({
-        _id: new ObjectId(id),
-      });
-
-      if (!existingBooking) {
-        return res.status(404).send({ message: "Booking not found" });
-      }
-
-      if (normalizeEmail(existingBooking.customerEmail) !== req.user.email) {
-        return res
-          .status(403)
-          .send({ message: "Forbidden: You can only cancel your own booking" });
-      }
-
-      if (existingBooking.status !== "requested") {
-        return res.status(400).send({
-          message: "Only requested bookings can be cancelled",
-        });
-      }
-
-      const result = await bookingsCollection.updateOne(
-        { _id: new ObjectId(id) },
-        {
-          $set: {
-            status: "cancelled",
-            updatedAt: new Date(),
-          },
-          $push: {
-            statusHistory: {
-              status: "cancelled",
-              changedAt: new Date(),
-            },
-          },
-        }
-      );
-
-      res.send(result);
-    } catch (error) {
-      console.error("Error cancelling booking:", error);
-      res.status(500).send({ message: "Failed to cancel booking" });
-    }
-  }
+  cancelBookingHandler
 );
 
 // ==========================================
 // User Profile Routes
 // ==========================================
-// 12. ইউজারের প্রোফাইল তথ্য আনা
-app.get("/users/:email", verifyToken, async (req, res) => {
+const getUserProfileHandler = async (req, res) => {
   try {
     const email = normalizeEmail(decodeURIComponent(req.params.email || ""));
     if (!email) {
@@ -868,17 +922,19 @@ app.get("/users/:email", verifyToken, async (req, res) => {
         .send({ message: "Forbidden: You can only view your own profile" });
     }
 
-    const user = await usersCollection.findOne({
-      email: new RegExp(`^${escapeRegex(email)}$`, "i"),
-    });
+    const user = await usersCollection.findOne(
+      { email: new RegExp(`^${escapeRegex(email)}$`, "i") },
+      { projection: { password: 0 } }
+    );
     res.send(user || {});
   } catch (error) {
     console.error("Error fetching user:", error);
     res.status(500).send({ message: "Failed to fetch user" });
   }
-});
+};
 
-// 13. ইউজারের প্রোফাইল তথ্য আপডেট করা
+registerDualRoute("get", "/users/:email", verifyToken, getUserProfileHandler);
+
 const updateProfileHandler = async (req, res) => {
   try {
     const targetEmail = req.params.email
@@ -920,14 +976,13 @@ const updateProfileHandler = async (req, res) => {
   }
 };
 
-app.patch("/users/:email", verifyToken, updateProfileHandler);
-app.patch("/api/users/profile", verifyToken, updateProfileHandler);
+registerDualRoute("patch", "/users/:email", verifyToken, updateProfileHandler);
+registerDualRoute("patch", "/api/users/profile", verifyToken, updateProfileHandler);
 
 // ==========================================
 // Admin Dashboard Routes (Protected)
 // ==========================================
-// 15. অ্যাডমিনের জন্য সব সার্ভিস আনা
-app.get("/admin/services", verifyToken, verifyAdmin, async (req, res) => {
+const getAdminServicesHandler = async (req, res) => {
   try {
     const { status } = req.query;
     const query = {};
@@ -954,49 +1009,58 @@ app.get("/admin/services", verifyToken, verifyAdmin, async (req, res) => {
     console.error("Error fetching admin services:", error);
     res.status(500).send({ message: "Failed to load services" });
   }
-});
+};
 
-// 16. সার্ভিস Approve বা Reject করা
-app.patch(
+registerDualRoute(
+  "get",
+  "/admin/services",
+  verifyToken,
+  verifyAdmin,
+  getAdminServicesHandler
+);
+
+const updateServiceApprovalHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { approvalStatus } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid service ID" });
+    }
+
+    if (!["approved", "rejected", "pending"].includes(approvalStatus)) {
+      return res.status(400).send({ message: "Invalid approval status" });
+    }
+
+    const result = await servicesCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          approvalStatus,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    res.send(result);
+  } catch (error) {
+    console.error("Error updating service approval:", error);
+    res.status(500).send({ message: "Failed to update service approval" });
+  }
+};
+
+registerDualRoute(
+  "patch",
   "/admin/services/:id/approval",
   verifyToken,
   verifyAdmin,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { approvalStatus } = req.body;
-
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).send({ message: "Invalid service ID" });
-      }
-
-      if (!["approved", "rejected", "pending"].includes(approvalStatus)) {
-        return res.status(400).send({ message: "Invalid approval status" });
-      }
-
-      const result = await servicesCollection.updateOne(
-        { _id: new ObjectId(id) },
-        {
-          $set: {
-            approvalStatus,
-            updatedAt: new Date(),
-          },
-        }
-      );
-
-      res.send(result);
-    } catch (error) {
-      console.error("Error updating service approval:", error);
-      res.status(500).send({ message: "Failed to update service approval" });
-    }
-  }
+  updateServiceApprovalHandler
 );
 
-// 19. অ্যাডমিনের জন্য সব ইউজার আনা
-app.get("/admin/users", verifyToken, verifyAdmin, async (req, res) => {
+const getAdminUsersHandler = async (req, res) => {
   try {
     const users = await usersCollection
-      .find({})
+      .find({}, { projection: { password: 0 } })
       .sort({ createdAt: -1 })
       .toArray();
     res.send(users);
@@ -1004,57 +1068,66 @@ app.get("/admin/users", verifyToken, verifyAdmin, async (req, res) => {
     console.error("Error fetching admin users:", error);
     res.status(500).send({ message: "Failed to load users" });
   }
-});
+};
 
-// 20. অ্যাডমিন কর্তৃক ইউজারের রোল পরিবর্তন (নিজের রোল নিজে পরিবর্তন করতে পারবে না)
-app.patch(
+registerDualRoute(
+  "get",
+  "/admin/users",
+  verifyToken,
+  verifyAdmin,
+  getAdminUsersHandler
+);
+
+const updateUserRoleHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid user ID" });
+    }
+
+    if (!["customer", "technician", "admin"].includes(role)) {
+      return res.status(400).send({ message: "Invalid role" });
+    }
+
+    const targetUser = await usersCollection.findOne({
+      _id: new ObjectId(id),
+    });
+    if (!targetUser) {
+      return res.status(404).send({ message: "User not found" });
+    }
+
+    if (
+      targetUser.email &&
+      normalizeEmail(targetUser.email) === req.user.email
+    ) {
+      return res
+        .status(403)
+        .send({ message: "Admin cannot change their own role" });
+    }
+
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { role, updatedAt: new Date() } }
+    );
+
+    res.send(result);
+  } catch (error) {
+    console.error("Error updating user role:", error);
+    res.status(500).send({ message: "Failed to update user role" });
+  }
+};
+
+registerDualRoute(
+  "patch",
   "/admin/users/:id/role",
   verifyToken,
   verifyAdmin,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { role } = req.body;
-
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).send({ message: "Invalid user ID" });
-      }
-
-      if (!["customer", "technician", "admin"].includes(role)) {
-        return res.status(400).send({ message: "Invalid role" });
-      }
-
-      const targetUser = await usersCollection.findOne({
-        _id: new ObjectId(id),
-      });
-      if (!targetUser) {
-        return res.status(404).send({ message: "User not found" });
-      }
-
-      if (
-        targetUser.email &&
-        normalizeEmail(targetUser.email) === req.user.email
-      ) {
-        return res
-          .status(403)
-          .send({ message: "Admin cannot change their own role" });
-      }
-
-      const result = await usersCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { role, updatedAt: new Date() } }
-      );
-
-      res.send(result);
-    } catch (error) {
-      console.error("Error updating user role:", error);
-      res.status(500).send({ message: "Failed to update user role" });
-    }
-  }
+  updateUserRoleHandler
 );
 
-// 21. অ্যাডমিনের জন্য সব বুকিং আনা (Read-only + status filter)
-app.get("/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
+const getAdminBookingsHandler = async (req, res) => {
   try {
     const { status } = req.query;
     const query = {};
@@ -1073,10 +1146,17 @@ app.get("/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
     console.error("Error fetching admin bookings:", error);
     res.status(500).send({ message: "Failed to load bookings" });
   }
-});
+};
 
-// 22. অ্যাডমিনের জন্য সব ট্রানজেকশন আনা
-app.get("/admin/payments", verifyToken, verifyAdmin, async (req, res) => {
+registerDualRoute(
+  "get",
+  "/admin/bookings",
+  verifyToken,
+  verifyAdmin,
+  getAdminBookingsHandler
+);
+
+const getAdminPaymentsHandler = async (req, res) => {
   try {
     const payments = await paymentsCollection
       .find({})
@@ -1088,96 +1168,105 @@ app.get("/admin/payments", verifyToken, verifyAdmin, async (req, res) => {
     console.error("Error fetching admin payments:", error);
     res.status(500).send({ message: "Failed to load transactions" });
   }
-});
+};
+
+registerDualRoute(
+  "get",
+  "/admin/payments",
+  verifyToken,
+  verifyAdmin,
+  getAdminPaymentsHandler
+);
 
 // ==========================================
 // Stripe Payment & Payment History Routes
 // ==========================================
-// Stripe Checkout Session তৈরি করা (completed + unpaid ও নিজের বুকিংয়ের জন্য)
-app.post(
+const createCheckoutSessionHandler = async (req, res) => {
+  try {
+    if (!stripe) {
+      return res
+        .status(500)
+        .send({ message: "Stripe secret key is not configured on server" });
+    }
+
+    const { bookingId } = req.body;
+    if (!bookingId || !ObjectId.isValid(bookingId)) {
+      return res.status(400).send({ message: "Valid bookingId is required" });
+    }
+
+    const booking = await bookingsCollection.findOne({
+      _id: new ObjectId(bookingId),
+    });
+
+    if (!booking) {
+      return res.status(404).send({ message: "Booking not found" });
+    }
+
+    if (normalizeEmail(booking.customerEmail) !== req.user.email) {
+      return res
+        .status(403)
+        .send({ message: "Forbidden: You can only pay for your own booking" });
+    }
+
+    if (booking.status !== "completed" || booking.paymentStatus === "paid") {
+      return res.status(400).send({
+        message: "Payment is only allowed for completed and unpaid bookings",
+      });
+    }
+
+    const amountDollars = Number(
+      booking.finalAmount ?? booking.basePrice ?? 0
+    );
+    const unitAmountCents = Math.round(amountDollars * 100);
+
+    if (!Number.isFinite(unitAmountCents) || unitAmountCents <= 0) {
+      return res.status(400).send({ message: "Invalid payment amount" });
+    }
+
+    const baseClientUrl =
+      process.env.CLIENT_URL || clientUrl || "http://localhost:3000";
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      customer_email: booking.customerEmail,
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: {
+              name: booking.serviceTitle || "FixMate Repair Service",
+            },
+            unit_amount: unitAmountCents,
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        bookingId: booking._id.toString(),
+        customerEmail: booking.customerEmail,
+      },
+      success_url: `${baseClientUrl}/customer/payments/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseClientUrl}/customer/payments/cancel`,
+    });
+
+    res.send({ url: session.url, sessionId: session.id });
+  } catch (error) {
+    console.error("Stripe checkout session error:", error);
+    res
+      .status(500)
+      .send({ message: "Failed to create Stripe checkout session" });
+  }
+};
+
+registerDualRoute(
+  "post",
   "/api/payments/create-checkout-session",
   verifyToken,
   verifyCustomer,
-  async (req, res) => {
-    try {
-      if (!stripe) {
-        return res
-          .status(500)
-          .send({ message: "Stripe secret key is not configured on server" });
-      }
-
-      const { bookingId } = req.body;
-      if (!bookingId || !ObjectId.isValid(bookingId)) {
-        return res.status(400).send({ message: "Valid bookingId is required" });
-      }
-
-      const booking = await bookingsCollection.findOne({
-        _id: new ObjectId(bookingId),
-      });
-
-      if (!booking) {
-        return res.status(404).send({ message: "Booking not found" });
-      }
-
-      if (normalizeEmail(booking.customerEmail) !== req.user.email) {
-        return res
-          .status(403)
-          .send({ message: "Forbidden: You can only pay for your own booking" });
-      }
-
-      if (booking.status !== "completed" || booking.paymentStatus === "paid") {
-        return res.status(400).send({
-          message: "Payment is only allowed for completed and unpaid bookings",
-        });
-      }
-
-      const amountDollars = Number(
-        booking.finalAmount ?? booking.basePrice ?? 0
-      );
-      const unitAmountCents = Math.round(amountDollars * 100);
-
-      if (!Number.isFinite(unitAmountCents) || unitAmountCents <= 0) {
-        return res.status(400).send({ message: "Invalid payment amount" });
-      }
-
-      const baseClientUrl =
-        process.env.CLIENT_URL || clientUrl || "http://localhost:3000";
-
-      const session = await stripe.checkout.sessions.create({
-        mode: "payment",
-        customer_email: booking.customerEmail,
-        line_items: [
-          {
-            price_data: {
-              currency: "usd",
-              product_data: {
-                name: booking.serviceTitle || "FixMate Repair Service",
-              },
-              unit_amount: unitAmountCents,
-            },
-            quantity: 1,
-          },
-        ],
-        metadata: {
-          bookingId: booking._id.toString(),
-          customerEmail: booking.customerEmail,
-        },
-        success_url: `${baseClientUrl}/customer/payments/success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${baseClientUrl}/customer/payments/cancel`,
-      });
-
-      res.send({ url: session.url, sessionId: session.id });
-    } catch (error) {
-      console.error("Stripe checkout session error:", error);
-      res
-        .status(500)
-        .send({ message: "Failed to create Stripe checkout session" });
-    }
-  }
+  createCheckoutSessionHandler
 );
 
-// Stripe Payment ভেরিফাই করা ও ডুপ্লিকেট ছাড়া সেভ করা
-app.get("/api/payments/verify", verifyToken, async (req, res) => {
+const verifyPaymentHandler = async (req, res) => {
   try {
     if (!stripe) {
       return res
@@ -1309,95 +1398,103 @@ app.get("/api/payments/verify", verifyToken, async (req, res) => {
     console.error("Stripe payment verify error:", error);
     res.status(500).send({ message: "Failed to verify Stripe payment" });
   }
-});
+};
 
-// 17. বুকিংয়ের পেমেন্ট সম্পন্ন করা ও ট্রানজেকশন সেভ করা (Fallback manual/local pay)
-app.patch(
+registerDualRoute(
+  "get",
+  "/api/payments/verify",
+  verifyToken,
+  verifyPaymentHandler
+);
+
+const payBookingFallbackHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { paymentMethod = "Card" } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid booking ID" });
+    }
+
+    const booking = await bookingsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+    if (!booking) {
+      return res.status(404).send({ message: "Booking not found" });
+    }
+
+    if (normalizeEmail(booking.customerEmail) !== req.user.email) {
+      return res
+        .status(403)
+        .send({ message: "Forbidden: You can only pay for your own booking" });
+    }
+
+    if (booking.status !== "completed") {
+      return res.status(400).send({
+        message: "Booking must be completed before payment",
+      });
+    }
+
+    if (booking.paymentStatus === "paid") {
+      return res.status(400).send({ message: "Booking is already paid" });
+    }
+
+    const amount = Number(booking.finalAmount ?? booking.basePrice ?? 0);
+    const transactionId = `TXN-${Date.now()}-${Math.floor(
+      1000 + Math.random() * 9000
+    )}`;
+    const paidAt = new Date();
+
+    await bookingsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          paymentStatus: "paid",
+          transactionId,
+          paidAt,
+          updatedAt: paidAt,
+        },
+      }
+    );
+
+    const paymentRecord = {
+      bookingId: id,
+      transactionId,
+      serviceTitle: booking.serviceTitle,
+      category: booking.category || "Repair",
+      customerName: booking.customerName,
+      customerEmail: normalizeEmail(booking.customerEmail),
+      technicianName: booking.technicianName || "Technician",
+      technicianEmail: normalizeEmail(booking.technicianEmail || ""),
+      amount,
+      currency: "usd",
+      paymentMethod,
+      paymentStatus: "paid",
+      paidAt,
+    };
+
+    await paymentsCollection.insertOne(paymentRecord);
+
+    res.send({
+      success: true,
+      transactionId,
+      amount,
+      payment: paymentRecord,
+    });
+  } catch (error) {
+    console.error("Payment processing error:", error);
+    res.status(500).send({ message: "Failed to process payment" });
+  }
+};
+
+registerDualRoute(
+  "patch",
   "/bookings/:id/pay",
   verifyToken,
   verifyCustomer,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { paymentMethod = "Card" } = req.body;
-
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).send({ message: "Invalid booking ID" });
-      }
-
-      const booking = await bookingsCollection.findOne({
-        _id: new ObjectId(id),
-      });
-      if (!booking) {
-        return res.status(404).send({ message: "Booking not found" });
-      }
-
-      if (normalizeEmail(booking.customerEmail) !== req.user.email) {
-        return res
-          .status(403)
-          .send({ message: "Forbidden: You can only pay for your own booking" });
-      }
-
-      if (booking.status !== "completed") {
-        return res.status(400).send({
-          message: "Booking must be completed before payment",
-        });
-      }
-
-      if (booking.paymentStatus === "paid") {
-        return res.status(400).send({ message: "Booking is already paid" });
-      }
-
-      const amount = Number(booking.finalAmount ?? booking.basePrice ?? 0);
-      const transactionId = `TXN-${Date.now()}-${Math.floor(
-        1000 + Math.random() * 9000
-      )}`;
-      const paidAt = new Date();
-
-      await bookingsCollection.updateOne(
-        { _id: new ObjectId(id) },
-        {
-          $set: {
-            paymentStatus: "paid",
-            transactionId,
-            paidAt,
-            updatedAt: paidAt,
-          },
-        }
-      );
-
-      const paymentRecord = {
-        bookingId: id,
-        transactionId,
-        serviceTitle: booking.serviceTitle,
-        category: booking.category || "Repair",
-        customerName: booking.customerName,
-        customerEmail: normalizeEmail(booking.customerEmail),
-        technicianName: booking.technicianName || "Technician",
-        technicianEmail: normalizeEmail(booking.technicianEmail || ""),
-        amount,
-        currency: "usd",
-        paymentMethod,
-        paymentStatus: "paid",
-        paidAt,
-      };
-
-      await paymentsCollection.insertOne(paymentRecord);
-
-      res.send({
-        success: true,
-        transactionId,
-        amount,
-        payment: paymentRecord,
-      });
-    } catch (error) {
-      console.error("Payment processing error:", error);
-      res.status(500).send({ message: "Failed to process payment" });
-    }
-  }
+  payBookingFallbackHandler
 );
 
-// 18. কাস্টমারের পেমেন্ট হিস্ট্রি আনা
 const getCustomerPaymentsHandler = async (req, res) => {
   try {
     const email = normalizeEmail(decodeURIComponent(req.params.email || ""));
@@ -1426,18 +1523,17 @@ const getCustomerPaymentsHandler = async (req, res) => {
   }
 };
 
-app.get(
+registerDualRoute(
+  "get",
   "/api/payments/customer/:email",
   verifyToken,
   getCustomerPaymentsHandler
 );
-app.get("/payments/customer/:email", verifyToken, getCustomerPaymentsHandler);
 
-// --Export middlewares for modular route usage if needed
 export { verifyToken, verifyCustomer, verifyTechnician, verifyAdmin };
 
 app.listen(port, () => {
   console.log(`Server listening on port ${port}`);
 });
 
-export default app
+export default app;
