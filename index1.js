@@ -923,10 +923,6 @@ const updateProfileHandler = async (req, res) => {
 app.patch("/users/:email", verifyToken, updateProfileHandler);
 app.patch("/api/users/profile", verifyToken, updateProfileHandler);
 
-// ==========================================
-// Admin Dashboard Routes (Protected)
-// ==========================================
-// 15. অ্যাডমিনের জন্য সব সার্ভিস আনা
 app.get("/admin/services", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { status } = req.query;
